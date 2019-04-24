@@ -107,6 +107,8 @@ class FargateSpawner(Spawner):
     notebook_port = Int(config=True)
     notebook_scheme = Unicode(config=True)
     notebook_args = List(trait=Unicode, config=True)
+    ecs_managed_tags = Bool(config=True)
+    tags = Dict(config=True)
 
     authentication_class = Type(FargateSpawnerAuthentication, config=True)
     authentication = Instance(FargateSpawnerAuthentication)
@@ -124,6 +126,27 @@ class FargateSpawner(Spawner):
     calling_run_task = Bool(False)
 
     progress_buffer = None
+
+    def get_tags(self):
+        """Return the tags dict to use for the Spawner.
+
+        When overriding in subclasses, subclasses must call 'super().get_tags()',
+        extend the returned dict and return it.
+
+        Use this to access the tags in Spawner.start to allow extension in subclasses.
+
+        Note: Tags are only supported in ECS using the new ARN format. Opt-in may be
+        required.
+        """
+        task_tags = {}
+
+        for key, value in self.tags.items():
+            if callable(value):
+                task_tags[key] = value(self)
+            else:
+                task_tags[key] = value
+
+        return task_tags
 
     def load_state(self, state):
         ''' Misleading name: this "loads" the state onto self, to be used by other methods '''
@@ -169,7 +192,7 @@ class FargateSpawner(Spawner):
                 self.task_role_arn,
                 self.task_cluster_name, self.task_container_name, self.task_definition_arn,
                 self.task_security_groups, self.task_subnets,
-                self.cmd + args, self.get_env())
+                self.cmd + args, self.get_env(), self.ecs_managed_tags, self.get_tags())
             task_arn = run_response['tasks'][0]['taskArn']
             self.progress_buffer.write({'progress': 1})
         finally:
@@ -290,8 +313,8 @@ async def _describe_task(logger, aws_endpoint, task_cluster_name, task_arn):
 async def _run_task(logger, aws_endpoint,
                     task_role_arn,
                     task_cluster_name, task_container_name, task_definition_arn, task_security_groups, task_subnets,
-                    task_command_and_args, task_env):
-    return await _make_ecs_request(logger, aws_endpoint, 'RunTask', {
+                    task_command_and_args, task_env, task_ecs_managed_tags, task_tags):
+    dict_data = {
         'cluster': task_cluster_name,
         'taskDefinition': task_definition_arn,
         'overrides': {
@@ -316,7 +339,17 @@ async def _run_task(logger, aws_endpoint,
                 'subnets': task_subnets,
             },
         },
-    })
+        'enableECSManagedTags': task_ecs_managed_tags
+    }
+
+    if task_tags:
+        dict_data['tags'] = [
+            {
+                'key': key,
+                'value': value,
+            } for key, value in task_tags.items()
+        ]
+    return await _make_ecs_request(logger, aws_endpoint, 'RunTask', dict_data)
 
 
 async def _make_ecs_request(logger, aws_endpoint, target, dict_data):
